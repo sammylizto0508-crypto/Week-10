@@ -1,6 +1,7 @@
 import json
 import os
 import time
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 import streamlit as st
@@ -222,7 +223,10 @@ def build_chat_messages(messages, memory):
     chat = [
         {
             "role": "system",
-            "content": "You are a helpful assistant. Use the conversation history and user memory for context.",
+            "content": (
+                "You are a helpful assistant. Use the conversation history and user memory for context. "
+                "Do not reveal internal reasoning or chain-of-thought. Respond with the final answer only."
+            ),
         }
     ]
     if memory:
@@ -310,6 +314,14 @@ def extract_text_from_stream_payload(payload):
                 if isinstance(delta, dict):
                     return delta.get("content", "") or ""
     return ""
+
+
+def strip_think_blocks(text):
+    if not text:
+        return text
+    cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    cleaned = cleaned.replace("<think>", "").replace("</think>", "")
+    return cleaned.strip()
 
 
 def extract_memory_update(token, user_message):
@@ -509,13 +521,15 @@ if user_input:
             assistant_text = f"Sorry, I ran into an API error: {error}"
         else:
             assistant_text = ""
+            raw_text = ""
             with history_container:
                 with st.chat_message("assistant"):
                     placeholder = st.empty()
                     for payload in parse_sse_lines(response):
                         chunk = extract_text_from_stream_payload(payload)
                         if chunk:
-                            assistant_text += chunk
+                            raw_text += chunk
+                            assistant_text = strip_think_blocks(raw_text)
                             placeholder.write(assistant_text)
                             time.sleep(STREAM_DELAY_SEC)
             if not assistant_text:
@@ -524,8 +538,9 @@ if user_input:
         assistant_text = generate_assistant_response(user_input)
         with history_container:
             with st.chat_message("assistant"):
-                st.write(assistant_text)
+                st.write(strip_think_blocks(assistant_text))
 
+    assistant_text = strip_think_blocks(assistant_text)
     messages.append({"role": "assistant", "content": assistant_text})
     current_chat["messages"] = messages
     save_chat(current_chat)
