@@ -368,6 +368,9 @@ if not hf_token:
     st.error(
         "Missing Hugging Face token. Add HF_TOKEN to .streamlit/secrets.toml to enable chat."
     )
+    st.sidebar.warning("HF token not loaded")
+else:
+    st.sidebar.success("HF token loaded")
 
 if "current_chat_id" not in st.session_state:
     chats = list_chats()
