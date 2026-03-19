@@ -10,7 +10,7 @@ BASE_DIR = Path(__file__).parent
 CHAT_DIR = BASE_DIR / "chats"
 MEMORY_PATH = BASE_DIR / "memory.json"
 LOG_PATH = BASE_DIR / "ai_interaction_log.md"
-HF_MODEL = "google/flan-t5-small"
+HF_MODEL = "deepseek-ai/DeepSeek-R1:fastest"
 STREAM_DELAY_SEC = 0.03
 
 DEFAULT_MEMORY = {
@@ -177,10 +177,17 @@ def get_hf_token():
 
 
 def call_hf_test_message(token, message="Hello!"):
-    url = f"https://api-inference.huggingface.co/models/{HF_MODEL}"
+    url = "https://router.huggingface.co/v1/chat/completions"
     headers = {"Authorization": f"Bearer {token}"}
     try:
-        resp = requests.post(url, headers=headers, json={"inputs": message}, timeout=20)
+        payload = {
+            "model": HF_MODEL,
+            "messages": [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": message},
+            ],
+        }
+        resp = requests.post(url, headers=headers, json=payload, timeout=20)
     except requests.RequestException as exc:
         return None, f"Network error while contacting Hugging Face: {exc}"
 
@@ -199,47 +206,66 @@ def call_hf_test_message(token, message="Hello!"):
     except ValueError:
         return None, "Hugging Face response could not be decoded."
 
-    if isinstance(data, list) and data:
-        first = data[0]
-        if isinstance(first, dict):
-            if "generated_text" in first:
-                return first["generated_text"], None
-            if "summary_text" in first:
-                return first["summary_text"], None
-        if isinstance(first, str):
-            return first, None
     if isinstance(data, dict):
-        if "generated_text" in data:
-            return data["generated_text"], None
+        if "choices" in data and data["choices"]:
+            first = data["choices"][0]
+            if isinstance(first, dict):
+                message = first.get("message", {})
+                if isinstance(message, dict) and message.get("content"):
+                    return message["content"], None
         if "error" in data:
             return None, data["error"]
     return None, "Unexpected response format from Hugging Face."
 
 
-def build_prompt_from_history(messages, memory):
-    lines = [
-        "You are a helpful assistant. Use the conversation history and user memory for context.",
-        "",
+def build_chat_messages(messages, memory):
+    chat = [
+        {
+            "role": "system",
+            "content": "You are a helpful assistant. Use the conversation history and user memory for context.",
+        }
     ]
     if memory:
-        lines.append(f"User memory: {json.dumps(memory)}")
-        lines.append("")
+        chat.append({"role": "system", "content": f"User memory: {json.dumps(memory)}"})
     for msg in messages:
-        role = "User" if msg["role"] == "user" else "Assistant"
-        lines.append(f"{role}: {msg['content']}")
-    lines.append("Assistant:")
-    return "\n".join(lines)
+        chat.append({"role": msg["role"], "content": msg["content"]})
+    return chat
 
 
 def call_hf_with_history(token, messages, memory):
-    prompt = build_prompt_from_history(messages, memory)
-    return call_hf_test_message(token, prompt)
+    chat_messages = build_chat_messages(messages, memory)
+    url = "https://router.huggingface.co/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {token}"}
+    payload = {"model": HF_MODEL, "messages": chat_messages}
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=30)
+    except requests.RequestException as exc:
+        return None, f"Network error while contacting Hugging Face: {exc}"
+    if resp.status_code != 200:
+        error_message = f"Hugging Face API error ({resp.status_code})."
+        try:
+            payload_json = resp.json()
+            if isinstance(payload_json, dict) and payload_json.get("error"):
+                error_message = payload_json["error"]
+        except ValueError:
+            pass
+        return None, error_message
+    try:
+        data = resp.json()
+    except ValueError:
+        return None, "Hugging Face response could not be decoded."
+    if isinstance(data, dict) and data.get("choices"):
+        first = data["choices"][0]
+        message = first.get("message", {})
+        if isinstance(message, dict) and message.get("content"):
+            return message["content"], None
+    return None, "Unexpected response format from Hugging Face."
 
 
 def call_hf_stream(token, prompt):
-    url = f"https://api-inference.huggingface.co/models/{HF_MODEL}"
+    url = "https://router.huggingface.co/v1/chat/completions"
     headers = {"Authorization": f"Bearer {token}"}
-    payload = {"inputs": prompt, "stream": True}
+    payload = {"model": HF_MODEL, "messages": prompt, "stream": True}
     try:
         resp = requests.post(url, headers=headers, json=payload, stream=True, timeout=60)
     except requests.RequestException as exc:
@@ -277,12 +303,12 @@ def parse_sse_lines(response):
 
 def extract_text_from_stream_payload(payload):
     if isinstance(payload, dict):
-        if "token" in payload and isinstance(payload["token"], dict):
-            return payload["token"].get("text", "")
-        if "generated_text" in payload:
-            return payload.get("generated_text", "")
-        if "text" in payload:
-            return payload.get("text", "")
+        if "choices" in payload and payload["choices"]:
+            choice = payload["choices"][0]
+            if isinstance(choice, dict):
+                delta = choice.get("delta", {})
+                if isinstance(delta, dict):
+                    return delta.get("content", "") or ""
     return ""
 
 
@@ -454,7 +480,7 @@ with st.sidebar.expander("Debug Memory + Prompt", expanded=False):
         st.markdown("**Current Memory**")
         st.json(memory)
         st.markdown("**Prompt Preview**")
-        st.code(build_prompt_from_history(messages, memory))
+        st.code(json.dumps(build_chat_messages(messages, memory), indent=2))
 
 history_container = st.container(height=520, border=True)
 with history_container:
@@ -477,8 +503,8 @@ if user_input:
         save_memory(memory)
 
     if hf_token:
-        prompt = build_prompt_from_history(messages, memory)
-        response, error = call_hf_stream(hf_token, prompt)
+        chat_messages = build_chat_messages(messages, memory)
+        response, error = call_hf_stream(hf_token, chat_messages)
         if error:
             assistant_text = f"Sorry, I ran into an API error: {error}"
         else:
