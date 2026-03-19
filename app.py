@@ -289,7 +289,8 @@ def extract_text_from_stream_payload(payload):
 def extract_memory_update(token, user_message):
     prompt = (
         "Extract any personal facts or preferences from the user message. "
-        "Return ONLY a JSON object. If none, return {}.\n\n"
+        "Return ONLY a JSON object with keys like name, interests, preferred_language, "
+        "communication_style, favorite_topics. If none, return {}.\n\n"
         f"User message: {user_message}"
     )
     response_text, error = call_hf_test_message(token, prompt)
@@ -300,7 +301,15 @@ def extract_memory_update(token, user_message):
         if isinstance(data, dict):
             return data
     except ValueError:
-        pass
+        start = response_text.find("{")
+        end = response_text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            try:
+                data = json.loads(response_text[start : end + 1])
+                if isinstance(data, dict):
+                    return data
+            except ValueError:
+                pass
     return {}
 
 
@@ -460,8 +469,9 @@ if user_input:
     if current_chat.get("title", "New Chat") == "New Chat":
         current_chat["title"] = (user_input[:20] + "...") if len(user_input) > 20 else user_input
 
-    memory = update_memory_from_text(memory, user_input)
-    save_memory(memory)
+    if not hf_token:
+        memory = update_memory_from_text(memory, user_input)
+        save_memory(memory)
 
     if hf_token:
         prompt = build_prompt_from_history(messages, memory)
